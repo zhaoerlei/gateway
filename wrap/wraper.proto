@@ -1,0 +1,36 @@
+package wrap;
+
+// bag id = 0
+message Msg{
+    required string event = 1;
+    enum Type {
+        UNKNOWN = 0;
+        USER_COUNT = 1;
+    };
+    required Type tp = 2 [default = UNKNOWN]; // message type
+    repeated Meta meta = 3;
+    optional int32 userCount = 4;
+}
+
+// bag id = 1
+message Cmd {
+    enum Type {
+        UNKNOWN = 0;
+        HANDSHAKE = 1;
+        PING = 2;
+        PONG = 3;
+    }
+    required Type tp = 1; //type
+    required int64 ct = 2;// timestamp
+    optional string txt = 3 [default = ""]; 
+    repeated Meta meta = 4;
+}
+
+// meta, add invisible payload to message & command
+message Meta{
+    enum Type {
+        UNKNOWN = 0;
+    };
+    required Type tp = 1;
+    required string txt = 2;
+}

@@ -1,0 +1,140 @@
+package gateway
+
+import (
+	"fmt"
+	"gate/tools"
+	"gate/wrap"
+	"log"
+	"time"
+)
+
+type conState struct {
+	socket *Socket
+	online bool
+}
+
+type ConAdapter interface {
+	Read() ([]byte, error)
+	Write([]byte) error
+	Close()
+	RemoteIp() string
+}
+
+type readData struct {
+	dataArr []byte
+	err     error
+}
+
+type Socket struct {
+	SocketId    string          //每一个连接的标识
+	ticker      *time.Ticker    //倒计时工具 利用它里面的. ticker.C这个channel实现倒计时监听
+	adapter     ConAdapter      // 网络视频器 真正的Write由它实现
+	ch          chan []byte     //写channel  initconn的时候启动一个goroutine监听这个channel随时下发消息
+	ClientRooms map[string]bool //这个连接都属于那些房间 roomName true
+	router      *Router         //把router保存下来吧 发信息的时候用它方便些 仿照socket.io
+	SocketState bool
+	RemoteIp    string
+}
+
+func (socket *Socket) write(chState chan<- *conState) {
+	for {
+		//如果socket已经关闭 就关闭了 不用担心
+		select {
+		case b := <-socket.ch:
+			if b == nil { //channel 关闭时这里会收到nil offline的时候会close 退出房间的工作已经由offline做了
+
+				// log.Println("&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&", socket.SocketId)
+				socket.ticker.Stop()
+				socket.adapter.Close() //退出房间由chState传出去由offline处理
+				return
+			}
+			//			log.Println("down msg for ", socket)
+			socket.innerWrite(chState, b)
+		case <-socket.ticker.C:
+			socket.innerWrite(chState, socket.ping())
+		}
+	}
+}
+
+func (socket *Socket) innerWrite(chState chan<- *conState, b []byte) {
+	if !socket.SocketState {
+		log.Println("write byte to client", socket.SocketId, socket.SocketState, len(b))
+	}
+	if err := socket.adapter.Write(b); err != nil {
+		log.Println("write err", err)
+		chState <- &conState{socket: socket, online: false} //因网络错误造成的连接断开的消息传出去offline处理离开房间并且关闭ch
+	}
+}
+
+func (socket *Socket) read(chState chan<- *conState, chUp chan<- *Packet) {
+	chReadData := make(chan *readData)
+	noReadTicker := time.NewTicker(time.Duration(3) * time.Second)
+	for {
+		if !socket.SocketState {
+			log.Println("read socketState:", socket.SocketState)
+		}
+		go readFromClient(socket, chReadData)
+		select {
+		case rData := <-chReadData:
+			if rData.err != nil {
+				log.Println("read err", rData.err)
+				chState <- &conState{socket: socket, online: false}
+				noReadTicker.Stop()
+				return
+			}
+			// log.Println("read byte from client", len(b))
+			chUp <- &Packet{SocketId: socket.SocketId, Sock: socket, DataArr: rData.dataArr}
+		case <-noReadTicker.C:
+			log.Println("3 Second no read data!!", socket.SocketId)
+		}
+	}
+}
+
+func readFromClient(socket *Socket, chReadData chan<- *readData) {
+	b, err := socket.adapter.Read()
+	chReadData <- &readData{dataArr: b, err: err}
+}
+
+//这个方法不应该被随便调用 感觉只应该在offline里调用 要不然怎么退出room呢
+func (socket *Socket) close() {
+	//	log.Println("close down channel", socket )
+	defer tools.Safely("socket.ch close")
+	close(socket.ch)
+}
+
+//给用户发送消息 可以从外部直接调用
+// func (socket *Socket) SendToClient() {
+
+// }
+
+//TODO 这个和handshake一样应该传进来 另外再测发送人数信息
+func (socket *Socket) ping() []byte {
+	cmd := wrap.CreateCmd(wrap.Cmd_PING, "", Tick())
+	b, err := wrap.Boxing(cmd)
+	if err != nil {
+		log.Println("build ping command fail", err)
+	}
+	return b
+}
+
+//TODO 这玩意应该放到socket里面 拼handshake应另写一个方法穿进去
+func (socket *Socket) sendHandshake(chSocket chan *Socket) {
+	if !socket.SocketState {
+		log.Println("handshake has close")
+		return
+	}
+	cmd := wrap.CreateCmd(wrap.Cmd_HANDSHAKE, fmt.Sprintf(socket.SocketId), Tick())
+	b, err := wrap.Boxing(cmd)
+	// log.Println(b)
+	if err != nil {
+		log.Println("build handshake command fail", err)
+		return
+	}
+	socket.ch <- b
+	chSocket <- socket
+	log.Println("handshake has send", len(b))
+}
+
+func Tick() int64 {
+	return time.Now().UnixNano() / 1e6
+}
